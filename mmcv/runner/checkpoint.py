@@ -6,13 +6,13 @@ import warnings
 from collections import OrderedDict
 from importlib import import_module
 
-import mmcv
 import torch
 import torchvision
+from terminaltables import AsciiTable
 from torch.utils import model_zoo
 
+import mmcv
 from .utils import get_dist_info
-
 
 open_mmlab_model_urls = {
     'vgg16_caffe': 'https://s3.ap-northeast-2.amazonaws.com/open-mmlab/pretrain/third_party/vgg16_caffe-292e1171.pth',  # noqa: E501
@@ -56,6 +56,8 @@ def load_state_dict(module, state_dict, strict=False, logger=None):
             message. If not specified, print function will be used.
     """
     unexpected_keys = []
+    shape_mismatch_pairs = []
+
     own_state = module.state_dict()
     for name, param in state_dict.items():
         if name not in own_state:
@@ -64,16 +66,18 @@ def load_state_dict(module, state_dict, strict=False, logger=None):
         if isinstance(param, torch.nn.Parameter):
             # backwards compatibility for serialized parameters
             param = param.data
+        if param.size() != own_state[name].size():
+            shape_mismatch_pairs.append(
+                [name, own_state[name].size(),
+                 param.size()])
+            continue
+        own_state[name].copy_(param)
 
-        try:
-            own_state[name].copy_(param)
-        except Exception:
-            raise RuntimeError(
-                'While copying the parameter named {}, '
-                'whose dimensions in the model are {} and '
-                'whose dimensions in the checkpoint are {}.'.format(
-                    name, own_state[name].size(), param.size()))
-    missing_keys = set(own_state.keys()) - set(state_dict.keys())
+    all_missing_keys = set(own_state.keys()) - set(state_dict.keys())
+    # ignore "num_batches_tracked" of BN layers
+    missing_keys = [
+        key for key in all_missing_keys if 'num_batches_tracked' not in key
+    ]
 
     err_msg = []
     if unexpected_keys:
@@ -82,8 +86,17 @@ def load_state_dict(module, state_dict, strict=False, logger=None):
     if missing_keys:
         err_msg.append('missing keys in source state_dict: {}\n'.format(
             ', '.join(missing_keys)))
-    err_msg = '\n'.join(err_msg)
-    if err_msg:
+    if shape_mismatch_pairs:
+        mismatch_info = 'these keys have mismatched shape:\n'
+        header = ['key', 'expected shape', 'loaded shape']
+        table_data = [header] + shape_mismatch_pairs
+        table = AsciiTable(table_data)
+        err_msg.append(mismatch_info + table.table)
+
+    if len(err_msg) > 0:
+        err_msg.insert(
+            0, 'The model and loaded state dict do not match exactly\n')
+        err_msg = '\n'.join(err_msg)
         if strict:
             raise RuntimeError(err_msg)
         elif logger is not None:
